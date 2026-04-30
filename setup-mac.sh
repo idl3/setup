@@ -104,9 +104,14 @@ cask "font-jetbrains-mono-nerd-font"
 BREWFILE
 ok "brew bundle complete"
 
-# tmux-window-name plugin needs libtmux importable from python3
-if ! python3 -c "import libtmux" >/dev/null 2>&1; then
-  pip3 install --user --break-system-packages libtmux >/dev/null
+# tmux-window-name plugin needs libtmux importable from Homebrew's python3.
+# python@3.13 is keg-only, so use the versioned binaries directly — `python3`/
+# `pip3` on macOS resolve to Apple's system Python 3.9, whose pip is too old
+# for --break-system-packages (added in pip 23.0.1).
+BREW_PY="$(brew --prefix python@3.13)/bin/python3.13"
+BREW_PIP="$(brew --prefix python@3.13)/bin/pip3.13"
+if ! "$BREW_PY" -c "import libtmux" >/dev/null 2>&1; then
+  "$BREW_PIP" install --user --break-system-packages libtmux >/dev/null
   ok "installed libtmux (tmux-window-name dependency)"
 else
   skip "libtmux"
