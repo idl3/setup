@@ -57,11 +57,28 @@ log "Pre-flight checks"
 ARCH=$(uname -m)
 ok "macOS detected (arch: $ARCH)"
 
+# Detect existing tmux / SSH context. Nested tmux (a tmux server inside another
+# tmux pane, especially across SSH) breaks key bindings and is what we want to
+# avoid. $TMUX is the canonical "am I in tmux" signal; a multiplexed $TERM
+# (tmux*/screen*) over SSH means the *parent* terminal is a multiplexer.
+IN_TMUX=0
+if [[ -n "${TMUX:-}" ]]; then
+  IN_TMUX=1
+elif [[ "${TERM:-}" == tmux* || "${TERM:-}" == screen* ]]; then
+  IN_TMUX=1
+fi
+IN_SSH=0
+[[ -n "${SSH_TTY:-}${SSH_CONNECTION:-}" ]] && IN_SSH=1
+if [[ $IN_TMUX -eq 1 ]]; then
+  ok "tmux context detected (TMUX=${TMUX:-unset} TERM=${TERM:-}) — will skip nested-tmux operations"
+fi
+[[ $IN_SSH -eq 1 ]] && ok "SSH session detected"
+
 # ─── Phase 1: Homebrew ───────────────────────────────────────────────────────
 log "Phase 1 — Homebrew"
 if ! command -v brew >/dev/null 2>&1; then
-  warn "Homebrew not found — installing"
-  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  warn "Homebrew not found — installing (NONINTERACTIVE; sudo may prompt once)"
+  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
   if [[ "$ARCH" == "arm64" ]]; then
     eval "$(/opt/homebrew/bin/brew shellenv)"
   else
@@ -295,11 +312,18 @@ if ! grep -q "bootstrap-shell-init-start" "$ZSHRC"; then
 cat >> "$ZSHRC" <<'ZSHEOF'
 
 # >>> bootstrap-shell-init-start >>>
-# tmux plugin: always land in tmux on shell startup
-# AUTOSTART_ONCE prevents re-spawn when you exit tmux; AUTOCONNECT attaches to
-# existing session instead of creating duplicates; AUTOQUIT=false keeps the
-# shell alive after detach so the terminal doesn't close.
-ZSH_TMUX_AUTOSTART=true
+# tmux plugin: auto-start tmux on shell start, but never nest.
+# Skip auto-start when:
+#   - already inside tmux ($TMUX set), or
+#   - SSH session whose parent terminal is itself a multiplexer
+#     (TERM=tmux* / screen* — running tmux here would nest under the local one).
+if [[ -n "${TMUX:-}" ]] \
+   || { [[ -n "${SSH_TTY:-}${SSH_CONNECTION:-}" ]] \
+        && [[ "${TERM:-}" == tmux* || "${TERM:-}" == screen* ]]; }; then
+  ZSH_TMUX_AUTOSTART=false
+else
+  ZSH_TMUX_AUTOSTART=true
+fi
 ZSH_TMUX_AUTOSTART_ONCE=true
 ZSH_TMUX_AUTOCONNECT=false   # each new tab spawns its own tmux session (not shared)
 ZSH_TMUX_AUTOQUIT=false
@@ -524,14 +548,21 @@ fi
 
 # ─── Phase 10: bootstrap tmux + install plugins headless ─────────────────────
 log "Phase 10 — Install tmux plugins headless"
-# Kill any pre-existing server so the new conf takes effect cleanly
-tmux kill-server 2>/dev/null || true
-sleep 1
-tmux new-session -d -s _bootstrap -x 200 -y 50
-sleep 2
-"$HOME/.tmux/plugins/tpm/scripts/install_plugins.sh" >/dev/null 2>&1 || warn "TPM install reported issues — run 'prefix + I' inside tmux to retry"
-ok "tmux plugins installed"
-tmux kill-session -t _bootstrap 2>/dev/null || true
+if [[ $IN_TMUX -eq 1 ]]; then
+  warn "Already inside tmux — skipping headless plugin install (kill-server would"
+  warn "  terminate this session). After exiting, start a fresh tmux and press"
+  warn "  'prefix + I' (Ctrl-q I) to install plugins. Or run this script again"
+  warn "  from a non-tmux shell."
+else
+  # Kill any pre-existing server so the new conf takes effect cleanly
+  tmux kill-server 2>/dev/null || true
+  sleep 1
+  tmux new-session -d -s _bootstrap -x 200 -y 50
+  sleep 2
+  "$HOME/.tmux/plugins/tpm/scripts/install_plugins.sh" >/dev/null 2>&1 || warn "TPM install reported issues — run 'prefix + I' inside tmux to retry"
+  ok "tmux plugins installed"
+  tmux kill-session -t _bootstrap 2>/dev/null || true
+fi
 
 # ─── Final summary ───────────────────────────────────────────────────────────
 log "Setup complete"
